@@ -12,14 +12,20 @@ exports.handler = async (event) => {
   };
 
   if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: cors, body: '' };
+    return { statusCode: 204, headers: { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: '' };
   }
 
   if (!apiKey) {
     return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'ELEVENLABS_API_KEY not set' }) };
   }
 
-  const p = event.queryStringParameters || {};
+  /* Accept params from query string OR POST JSON body (needed for long TTS text) */
+  const q = event.queryStringParameters || {};
+  let bodyParams = {};
+  if (event.body) {
+    try { bodyParams = JSON.parse(event.body); } catch (_) {}
+  }
+  const p = Object.assign({}, q, bodyParams);
   const elHeaders = { 'xi-api-key': apiKey, 'Content-Type': 'application/json' };
 
   try {
