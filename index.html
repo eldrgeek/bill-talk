@@ -562,6 +562,18 @@
     }
 
     async function startConversation() {
+      // iOS Safari requires getUserMedia to be called within a synchronous
+      // user-gesture context. Pre-warm here so the SDK can acquire the mic.
+      try {
+        const pre = await navigator.mediaDevices.getUserMedia({ audio: true });
+        pre.getTracks().forEach(t => t.stop());
+      } catch (err) {
+        document.getElementById('error-msg').textContent =
+          'Microphone access denied. Please allow microphone access in your browser settings and try again.';
+        show('error-state');
+        return;
+      }
+
       show('connecting-state');
 
       try {
