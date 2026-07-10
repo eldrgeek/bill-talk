@@ -44,9 +44,13 @@ exports.handler = async (event) => {
       if (!p.text) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'text required' }) };
 
       let voiceId = p.voice_id;
+      if (!voiceId && p.app_id) {
+        const appVoices = { 'yeshie': 'W1EJxHy9vl73xgPIKgpn' };
+        voiceId = appVoices[p.app_id];
+      }
       if (!voiceId) {
         const agentId = p.agent_id;
-        if (!agentId) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'agent_id or voice_id required' }) };
+        if (!agentId) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'agent_id, app_id, or voice_id required' }) };
 
         if (!voiceCache[agentId]) {
           const agentResp = await fetch(`${EL_BASE}/convai/agents/${encodeURIComponent(agentId)}`, { headers: elHeaders });
