@@ -42,6 +42,14 @@ switch — izzy-chat synthesizes through this proxy.
 - `ELEVENLABS_API_KEY` — ElevenLabs API key. If missing → el-proxy returns 500 "ELEVENLABS_API_KEY not set". If expired/over-quota → el-proxy returns ElevenLabs error payload.
 - `VOICE_INGEST_TOKEN` (optional, set 2026-07-24) — bearer token for PlayMaker's `/api/voice-generation-ingest`; when present, each successful tts synth is logged to the voice talent's §6 transparency panel. Absent → logging silently skipped, synth unaffected. (`VOICE_STATUS_URL` / `VOICE_INGEST_URL` override the PlayMaker endpoints for testing.)
 
+## ⚠ Netlify deploy gotcha (found 2026-07-24)
+The bill-talk Netlify site is linked to the WRONG repo — `eldrgeek/cora-talk`, not
+`eldrgeek/bill-talk` — so pushing to this repo does NOT deploy. The live site had been
+running a pre-TTS el-proxy since 2026-07-04 (izzy-chat's tts calls 400'd) until a manual
+`netlify deploy --prod` from this repo on 2026-07-24. Until the link is fixed in the
+Netlify UI (Site settings → Build & deploy → Link repository), every change here must be
+shipped with `netlify deploy --prod`.
+
 ## Diagnostic checks
 ```bash
 # Is the proxy alive?
