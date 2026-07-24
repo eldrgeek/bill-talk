@@ -3,6 +3,30 @@ const EL_BASE = 'https://api.elevenlabs.io/v1';
 /* Module-level voice cache — survives Lambda warm reuse, ephemeral otherwise */
 const voiceCache = {};
 
+/* Voice-talent kill switch (release §7). PlayMaker owns the talent registry;
+ * before any TTS synth this proxy asks its public voice-status endpoint for
+ * the resolved voice id. 'revoked' refuses, and an unreachable/5xx status
+ * endpoint ALSO refuses (fail closed) — an unverifiable license is not a
+ * license. 'active'/'unregistered' proceed. Verdicts cached 60s per warm
+ * Lambda so the per-utterance paths (izzy-chat et al.) don't pay a round trip
+ * per line. */
+const VOICE_STATUS_URL = process.env.VOICE_STATUS_URL || 'https://playmaker-mw.netlify.app/api/voice-status';
+const licenseCache = {}; // voiceId -> { status, checkedAt }
+async function voiceLicenseStatus(voiceId) {
+  const hit = licenseCache[voiceId];
+  if (hit && Date.now() - hit.checkedAt < 60 * 1000) return hit.status;
+  let status = 'unavailable';
+  try {
+    const resp = await fetch(`${VOICE_STATUS_URL}?voice_id=${encodeURIComponent(voiceId)}`);
+    if (resp.ok) {
+      const body = await resp.json();
+      if (body && body.status) status = String(body.status);
+    }
+  } catch (_) { /* status stays 'unavailable' → fail closed */ }
+  licenseCache[voiceId] = { status, checkedAt: Date.now() };
+  return status;
+}
+
 exports.handler = async (event) => {
   const apiKey = process.env.ELEVENLABS_API_KEY;
   const cors = {
@@ -67,6 +91,22 @@ exports.handler = async (event) => {
         voiceId = voiceCache[agentId];
       }
 
+      /* Kill-switch gate (release §7) — runs on the RESOLVED voice id, so it
+       * covers voice_id, app_id, and agent-derived voices alike. */
+      const license = await voiceLicenseStatus(voiceId);
+      if (license === 'revoked') {
+        return { statusCode: 403, headers: cors, body: JSON.stringify({
+          error: 'This voice is no longer available — its owner has revoked permission to generate new audio with it (voice release §7).',
+          voice_license: 'revoked',
+        }) };
+      }
+      if (license !== 'active' && license !== 'unregistered') {
+        return { statusCode: 503, headers: cors, body: JSON.stringify({
+          error: 'Voice license status unavailable — refusing to synthesize (fail closed, voice release §7). Retry shortly.',
+          voice_license: 'unavailable',
+        }) };
+      }
+
       const ttsResp = await fetch(`${EL_BASE}/text-to-speech/${encodeURIComponent(voiceId)}`, {
         method: 'POST',
         headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json', 'Accept': 'audio/mpeg' },
@@ -79,6 +119,26 @@ exports.handler = async (event) => {
       }
 
       const buf = await ttsResp.arrayBuffer();
+
+      /* §6 transparency-panel log — best-effort, never fails the synth. Awaited
+       * (not fire-and-forget) because the Lambda freezes at return. Skipped
+       * entirely when VOICE_INGEST_TOKEN is not configured. */
+      if (process.env.VOICE_INGEST_TOKEN) {
+        try {
+          await fetch(process.env.VOICE_INGEST_URL || 'https://playmaker-mw.netlify.app/api/voice-generation-ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.VOICE_INGEST_TOKEN}` },
+            body: JSON.stringify({
+              voice_id: voiceId,
+              app: p.app_id || 'el-proxy',
+              capability: 'tts',
+              text_content: String(p.text).slice(0, 2000),
+              char_count: String(p.text).length,
+            }),
+          });
+        } catch (_) { /* a logging hiccup must not eat the audio */ }
+      }
+
       return {
         statusCode: 200,
         headers: {

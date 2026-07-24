@@ -29,8 +29,18 @@ Actions:
 - `?action=get&conversation_id=<id>` — get transcript
 - `?action=tts` + POST body `{text, agent_id}` — synthesize speech
 
+Voice-talent kill switch (2026-07-24, voice release §7): before every `tts`
+synth the proxy checks the RESOLVED voice id against PlayMaker's registry
+(`GET playmaker-mw.netlify.app/api/voice-status?voice_id=<id>`). A registered
+talent voice whose owner revoked → **403** `{voice_license:"revoked"}`; status
+endpoint unreachable/5xx → **503** fail-closed. `active`/`unregistered` synth
+normally. Verdicts cached 60s per warm Lambda. This is how izzy-chat's Izzy
+voice (`RsotjdYjhjPD5V0I7nzI`, registered to Isabel Rosa) honors her kill
+switch — izzy-chat synthesizes through this proxy.
+
 ## Required Netlify env var (on bill-talk Netlify site)
 - `ELEVENLABS_API_KEY` — ElevenLabs API key. If missing → el-proxy returns 500 "ELEVENLABS_API_KEY not set". If expired/over-quota → el-proxy returns ElevenLabs error payload.
+- `VOICE_INGEST_TOKEN` (optional, set 2026-07-24) — bearer token for PlayMaker's `/api/voice-generation-ingest`; when present, each successful tts synth is logged to the voice talent's §6 transparency panel. Absent → logging silently skipped, synth unaffected. (`VOICE_STATUS_URL` / `VOICE_INGEST_URL` override the PlayMaker endpoints for testing.)
 
 ## Diagnostic checks
 ```bash
