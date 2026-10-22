@@ -1,0 +1,8 @@
+{
+  "name": "bill-talk",
+  "private": true,
+  "description": "Bill's voice page and the el-proxy / kb-list / kb-upload Netlify functions",
+  "dependencies": {
+    "@netlify/blobs": "^11.1.6"
+  }
+}

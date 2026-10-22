@@ -1,4 +1,21 @@
+const { connectLambda, getStore } = require('@netlify/blobs');
+const { TTS_ORIGIN_RES, BILL_ORIGIN_RES, callerOrigin, originAllowed, corsHeaders, bearerMatches } = require('../lib/guard');
+
 const EL_BASE = 'https://api.elevenlabs.io/v1';
+const BILL_AGENT_ID = 'agent_2401ks53q6t8e2drt1h7va3f2c52';
+
+/* Spend limits on the tts action (2026-10-22, bead es-vmo). The cap is shared
+ * by every caller and resets at 00:00 UTC; the count lives in Netlify Blobs
+ * so it holds across Lambda instances. Blobs reads here are eventually
+ * consistent (strong reads are not configured for Lambda-style functions),
+ * so instances can briefly undercount; the cap is approximate. Both are env-tunable without a code
+ * change (they take effect on the next deploy). */
+const DAILY_CHAR_CAP = parseInt(process.env.EL_PROXY_DAILY_CHAR_CAP || '15000', 10);
+const MAX_TEXT_CHARS = parseInt(process.env.EL_PROXY_MAX_TEXT_CHARS || '1500', 10);
+
+function usageKey() {
+  return 'tts-chars-' + new Date().toISOString().slice(0, 10);
+}
 
 /* Module-level voice cache — survives Lambda warm reuse, ephemeral otherwise */
 const voiceCache = {};
@@ -29,14 +46,18 @@ async function voiceLicenseStatus(voiceId) {
 
 exports.handler = async (event) => {
   const apiKey = process.env.ELEVENLABS_API_KEY;
-  const cors = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Content-Type': 'application/json',
-  };
+  const origin = callerOrigin(event);
+  /* A server-side caller (no browser, so no Origin or Referer) needs the
+   * EL_PROXY_SERVER_TOKEN bearer token instead. */
+  const serverCaller = !origin && bearerMatches(event, process.env.EL_PROXY_SERVER_TOKEN);
+  const allowed = serverCaller || originAllowed(origin, TTS_ORIGIN_RES);
+  const cors = corsHeaders(origin, allowed);
 
   if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: '' };
+    return { statusCode: allowed ? 204 : 403, headers: { ...cors, 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' }, body: '' };
+  }
+  if (!allowed) {
+    return { statusCode: 403, headers: cors, body: JSON.stringify({ error: 'origin not allowed' }) };
   }
 
   if (!apiKey) {
@@ -52,10 +73,17 @@ exports.handler = async (event) => {
   const p = Object.assign({}, q, bodyParams);
   const elHeaders = { 'xi-api-key': apiKey, 'Content-Type': 'application/json' };
 
+  /* Transcripts are read only by Bill's own page, and only Bill's: this key's
+   * account also holds other agents' conversations. */
+  if ((p.action === 'list' || p.action === 'get') && !serverCaller && !originAllowed(origin, BILL_ORIGIN_RES)) {
+    return { statusCode: 403, headers: cors, body: JSON.stringify({ error: 'transcripts are available only on Bill\'s page' }) };
+  }
+
   try {
     let url, resp;
     if (p.action === 'list') {
       if (!p.agent_id) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'agent_id required' }) };
+      if (p.agent_id !== BILL_AGENT_ID) return { statusCode: 403, headers: cors, body: JSON.stringify({ error: 'only Bill\'s conversations are listed here' }) };
       url = `${EL_BASE}/convai/conversations?agent_id=${encodeURIComponent(p.agent_id)}&page_size=50`;
       if (p.cursor) url += `&cursor=${encodeURIComponent(p.cursor)}`;
       resp = await fetch(url, { headers: elHeaders });
@@ -63,9 +91,33 @@ exports.handler = async (event) => {
       if (!p.conversation_id) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'conversation_id required' }) };
       url = `${EL_BASE}/convai/conversations/${encodeURIComponent(p.conversation_id)}`;
       resp = await fetch(url, { headers: elHeaders });
+      if (resp.ok) {
+        const conv = await resp.json();
+        if (conv.agent_id !== BILL_AGENT_ID) return { statusCode: 403, headers: cors, body: JSON.stringify({ error: 'only Bill\'s conversations are readable here' }) };
+        return { statusCode: 200, headers: cors, body: JSON.stringify(conv) };
+      }
     } else if (p.action === 'tts') {
       /* Synthesize text in the agent's configured voice and return audio/mpeg */
       if (!p.text) return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'text required' }) };
+      const textLen = String(p.text).length;
+      if (textLen > MAX_TEXT_CHARS) {
+        return { statusCode: 413, headers: cors, body: JSON.stringify({ error: `text longer than ${MAX_TEXT_CHARS} characters` }) };
+      }
+
+      /* Daily cap. If the counter cannot be read the proxy refuses (fail
+       * closed), the same rule the voice kill switch below follows. */
+      let usage, usedToday;
+      try {
+        connectLambda(event);
+        usage = getStore('el-proxy-usage');
+        usedToday = parseInt((await usage.get(usageKey())) || '0', 10) || 0;
+      } catch (err) {
+        console.error('el-proxy usage counter:', err && err.message);
+        return { statusCode: 503, headers: cors, body: JSON.stringify({ error: 'usage counter unavailable — refusing to synthesize. Retry shortly.' }) };
+      }
+      if (usedToday + textLen > DAILY_CHAR_CAP) {
+        return { statusCode: 429, headers: cors, body: JSON.stringify({ error: `daily speech limit reached (${DAILY_CHAR_CAP} characters, resets 00:00 UTC)` }) };
+      }
 
       let voiceId = p.voice_id;
       if (!voiceId && p.app_id) {
@@ -120,6 +172,13 @@ exports.handler = async (event) => {
 
       const buf = await ttsResp.arrayBuffer();
 
+      /* Count only what was actually synthesized. Read-then-write can lose a
+       * concurrent increment; that makes the cap approximate, not open. */
+      try {
+        const now = parseInt((await usage.get(usageKey())) || '0', 10) || 0;
+        await usage.set(usageKey(), String(now + textLen));
+      } catch (_) { /* the audio is already paid for; don't throw it away */ }
+
       /* §6 transparency-panel log — best-effort, never fails the synth. Awaited
        * (not fire-and-forget) because the Lambda freezes at return. Skipped
        * entirely when VOICE_INGEST_TOKEN is not configured. */
@@ -141,10 +200,7 @@ exports.handler = async (event) => {
 
       return {
         statusCode: 200,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Content-Type': 'audio/mpeg',
-        },
+        headers: { ...cors, 'Content-Type': 'audio/mpeg' },
         body: Buffer.from(buf).toString('base64'),
         isBase64Encoded: true,
       };

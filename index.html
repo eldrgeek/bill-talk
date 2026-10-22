@@ -503,6 +503,16 @@
     import { Conversation } from 'https://esm.sh/@elevenlabs/client@latest';
 
     const AGENT_ID = 'agent_2401ks53q6t8e2drt1h7va3f2c52';
+    /* Bill's agent opens with {{opening_line}} and closes the session (1008)
+     * when a caller leaves any of its dynamic variables unset. These are the
+     * agent's own placeholder values: an anonymous first-time visitor. */
+    const DYNAMIC_VARIABLES = {
+      opening_line: "Hi, I'm Bill.",
+      visitor_state: 'new',
+      display_name: '',
+      last_seen: '',
+      registered: 'unknown',
+    };
 
     let conversation = null;
     let textConv = null;
@@ -579,6 +589,7 @@
       try {
         conversation = await Conversation.startSession({
           agentId: AGENT_ID,
+          dynamicVariables: DYNAMIC_VARIABLES,
           onConnect: () => {
             show('active-state');
             setMode('listening');
@@ -623,6 +634,7 @@
       try {
         textConv = await Conversation.startSession({
           agentId: AGENT_ID,
+          dynamicVariables: DYNAMIC_VARIABLES,
           textOnly: true,
           onConnect: () => { show('text-active-state'); },
           onMessage: ({ source, message }) => {
@@ -716,6 +728,29 @@
 (function() {
   var KB_LIST  = '/.netlify/functions/kb-list';
   var KB_UPLOAD = '/.netlify/functions/kb-upload';
+  var KB_KEY_STORE = 'bill-kb-admin-key';
+
+  /* Adding to the Canon needs the admin key (kb-upload checks it on the
+   * server). Asked for once, then kept in this browser; a refused key is
+   * forgotten so the next try asks again. */
+  function kbUpload(payload) {
+    var key = null;
+    try { key = localStorage.getItem(KB_KEY_STORE); } catch(e) {}
+    if (!key) key = (window.prompt('Admin key for adding to Bill\'s Canon:') || '').trim();
+    if (!key) return Promise.resolve({ ok: false, d: { error: 'An admin key is needed to add to the Canon.' } });
+    return fetch(KB_UPLOAD, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify(payload) })
+    .then(function(r) { return r.json().catch(function() { return {}; }).then(function(d) {
+      if (r.status === 401) {
+        try { localStorage.removeItem(KB_KEY_STORE); } catch(e) {}
+        d = { error: 'That admin key was not accepted.' };
+      } else if (r.ok) {
+        try { localStorage.setItem(KB_KEY_STORE, key); } catch(e) {}
+      }
+      return { ok: r.ok, d: d };
+    }); });
+  }
 
   var overlay  = document.getElementById('kb-overlay');
   var kbBody   = document.getElementById('kb-body');
@@ -836,9 +871,7 @@
         var url = urlInput.value.trim();
         if (!url) { feedback.textContent = 'URL required.'; feedback.className = 'kb-feedback err'; return; }
         submit.disabled = true; submit.textContent = 'Uploading…'; feedback.textContent = '';
-        fetch(KB_UPLOAD, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'url', url: url, name: nameInput.value.trim() || undefined }) })
-        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+        kbUpload({ type: 'url', url: url, name: nameInput.value.trim() || undefined })
         .then(function(res) {
           if (res.ok) { feedback.textContent = '✓ Added: ' + (res.d.name || 'document'); feedback.className = 'kb-feedback ok'; submit.textContent = 'Add to Canon'; submit.disabled = false; urlInput.value = ''; nameInput.value = ''; }
           else { feedback.textContent = res.d.error || 'Upload failed.'; feedback.className = 'kb-feedback err'; submit.textContent = 'Add to Canon'; submit.disabled = false; }
@@ -878,9 +911,7 @@
         if (ext === 'txt' || ext === 'md') {
           var reader = new FileReader();
           reader.onload = function(e) {
-            fetch(KB_UPLOAD, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ type: 'text', text: e.target.result, name: docName }) })
-            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            kbUpload({ type: 'text', text: e.target.result, name: docName })
             .then(handleResult(fSubmit, feedback, docName)).catch(handleError(fSubmit, feedback));
           };
           reader.readAsText(file);
@@ -888,9 +919,7 @@
           var binReader = new FileReader();
           binReader.onload = function(e) {
             var b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(e.target.result)));
-            fetch(KB_UPLOAD, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ type: 'file_base64', content_base64: b64, filename: file.name, mime_type: file.type, name: docName }) })
-            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            kbUpload({ type: 'file_base64', content_base64: b64, filename: file.name, mime_type: file.type, name: docName })
             .then(handleResult(fSubmit, feedback, docName)).catch(handleError(fSubmit, feedback));
           };
           binReader.readAsArrayBuffer(file);

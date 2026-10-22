@@ -1,11 +1,8 @@
+const { BILL_ORIGIN_RES, callerOrigin, originAllowed, corsHeaders, bearerMatches } = require('../lib/guard');
+
 const EL_BASE = 'https://api.elevenlabs.io/v1';
 const BILL_AGENT_ID = 'agent_2401ks53q6t8e2drt1h7va3f2c52';
 
-const cors = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Content-Type': 'application/json',
-};
 
 function parseGdocId(url) {
   const m = url.match(/\/document\/d\/([-\w]+)/);
@@ -13,10 +10,21 @@ function parseGdocId(url) {
 }
 
 exports.handler = async (event) => {
+  const origin = callerOrigin(event);
+  const allowed = originAllowed(origin, BILL_ORIGIN_RES);
+  const cors = corsHeaders(origin, allowed);
+  if (!allowed) return { statusCode: 403, headers: cors, body: JSON.stringify({ error: 'origin not allowed' }) };
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: { ...cors, 'Access-Control-Allow-Methods': 'POST, OPTIONS' }, body: '' };
+
+  /* Adding to Bill's knowledge base is an admin action: the caller must
+   * present KB_ADMIN_TOKEN (set in Netlify env). Unset → nobody passes. */
+  if (!bearerMatches(event, process.env.KB_ADMIN_TOKEN)) {
+    return { statusCode: 401, headers: cors, body: JSON.stringify({ error: 'admin key required', admin_key: 'required' }) };
+  }
+
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'ELEVENLABS_API_KEY not set' }) };
 
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors, body: '' };
   if (event.httpMethod !== 'POST') return { statusCode: 405, headers: cors, body: JSON.stringify({ error: 'POST only' }) };
 
   let body;

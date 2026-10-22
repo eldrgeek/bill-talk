@@ -1,13 +1,15 @@
+const { BILL_ORIGIN_RES, callerOrigin, originAllowed, corsHeaders } = require('../lib/guard');
+
 const EL_BASE = 'https://api.elevenlabs.io/v1';
 const BILL_AGENT_ID = 'agent_2401ks53q6t8e2drt1h7va3f2c52';
 
-const cors = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Content-Type': 'application/json',
-};
 
 exports.handler = async (event) => {
+  const origin = callerOrigin(event);
+  const allowed = originAllowed(origin, BILL_ORIGIN_RES);
+  const cors = corsHeaders(origin, allowed);
+  if (!allowed) return { statusCode: 403, headers: cors, body: JSON.stringify({ error: 'origin not allowed' }) };
+
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'ELEVENLABS_API_KEY not set' }) };
 
